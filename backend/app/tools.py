@@ -8,36 +8,25 @@ class DriveTools:
         self.drive_service = drive_service
     
     def search_by_filename(self, filename: str, max_results: int = 20) -> List[Dict]:
-        """Search files by filename within the designated folder"""
-        return self.drive_service.search_files(
-            query=filename, 
-            max_results=max_results
-        )
+        """Search files by filename"""
+        return self.drive_service.search_files(query=filename, max_results=max_results)
     
     def search_by_filetype(self, filetype: str, max_results: int = 20) -> List[Dict]:
-        """Search files by file type (pdf, spreadsheet, image, etc.)"""
-        # Map common terms to Google Drive mimeTypes
-        type_mapping = {
-            'spreadsheet': 'spreadsheet',
-            'excel': 'spreadsheet',
-            'sheet': 'spreadsheet',
-            'image': 'image',
-            'picture': 'image',
-            'photo': 'image',
-            'pdf': 'pdf',
-            'presentation': 'presentation',
-            'powerpoint': 'presentation',
-            'slides': 'presentation',
-            'document': 'document',
-            'doc': 'document',
-            'word': 'document'
-        }
+        """Search files by file type"""
+        # Normalize file type
+        filetype_lower = filetype.lower()
         
-        mapped_type = type_mapping.get(filetype.lower(), filetype.lower())
-        return self.drive_service.search_files(
-            file_types=[mapped_type],
-            max_results=max_results
-        )
+        # Map common terms
+        if filetype_lower in ['spreadsheet', 'excel', 'sheet', 'xlsx']:
+            return self.drive_service.search_files(file_types=['spreadsheet'], max_results=max_results)
+        elif filetype_lower in ['image', 'picture', 'photo']:
+            return self.drive_service.search_files(file_types=['image'], max_results=max_results)
+        elif filetype_lower in ['pdf']:
+            return self.drive_service.search_files(file_types=['pdf'], max_results=max_results)
+        elif filetype_lower in ['presentation', 'powerpoint', 'slides']:
+            return self.drive_service.search_files(file_types=['presentation'], max_results=max_results)
+        else:
+            return self.drive_service.search_files(file_types=[filetype], max_results=max_results)
     
     def search_recent_files(self, days: int = 7, max_results: int = 20) -> List[Dict]:
         """Search files modified in the last N days"""
@@ -49,10 +38,8 @@ class DriveTools:
     
     def search_in_folder(self, folder_name: str, max_results: int = 20) -> List[Dict]:
         """Search for files inside a specific subfolder"""
-        # First find the folder by name
         all_items = self.drive_service.search_files(max_results=100)
         
-        # Find the folder
         target_folder = None
         for item in all_items:
             if item.get('name', '').lower() == folder_name.lower() and 'folder' in item.get('mimeType', ''):
@@ -62,14 +49,9 @@ class DriveTools:
         if not target_folder:
             return []
         
-        # Store original folder ID
         original_folder_id = self.drive_service.folder_id
-        
-        # Temporarily change to subfolder
         self.drive_service.folder_id = target_folder['id']
         files = self.drive_service.search_files(max_results=max_results)
-        
-        # Restore original folder ID
         self.drive_service.folder_id = original_folder_id
         
         return files
@@ -81,21 +63,15 @@ def parse_user_intent(query: str) -> Dict:
         'search_type': 'general',
         'filters': {},
         'search_term': '',
-        'response': None
     }
     
-    # Check for "list all files" or similar
-    if any(phrase in query_lower for phrase in ['list all', 'show all', 'all files', 'everything']):
-        intent['search_type'] = 'all_files'
-        return intent
-    
-    # Check for spreadsheet/excel queries
+    # Check for spreadsheet queries
     if any(word in query_lower for word in ['spreadsheet', 'excel', 'sheet', 'xlsx']):
         intent['search_type'] = 'filetype'
         intent['filters']['file_type'] = 'spreadsheet'
         return intent
     
-    # Check for image/photo queries
+    # Check for image queries
     if any(word in query_lower for word in ['image', 'picture', 'photo', 'jpg', 'png']):
         intent['search_type'] = 'filetype'
         intent['filters']['file_type'] = 'image'
@@ -108,35 +84,34 @@ def parse_user_intent(query: str) -> Dict:
         return intent
     
     # Check for presentation queries
-    if any(word in query_lower for word in ['presentation', 'powerpoint', 'slides', 'ppt']):
+    if any(word in query_lower for word in ['presentation', 'powerpoint', 'slides']):
         intent['search_type'] = 'filetype'
         intent['filters']['file_type'] = 'presentation'
         return intent
     
-    # Check for invoice queries
+    # Check for list all files
+    if any(word in query_lower for word in ['list all', 'show all', 'all files']):
+        intent['search_type'] = 'all_files'
+        return intent
+    
+    # Check for invoices folder
     if 'invoice' in query_lower:
         intent['search_type'] = 'invoices'
         return intent
     
     # Check for recent files
-    if any(word in query_lower for word in ['recent', 'new', 'latest', 'recently']):
+    if any(word in query_lower for word in ['recent', 'new', 'latest']):
         intent['search_type'] = 'recent'
-        # Extract number of days if specified
+        days = 7
         days_match = re.search(r'(\d+)\s*days?', query_lower)
         if days_match:
-            intent['filters']['days'] = int(days_match.group(1))
-        return intent
-    
-    # Check for date-based queries
-    if any(word in query_lower for word in ['april', 'may', 'june', 'march']):
-        intent['search_type'] = 'date'
+            days = int(days_match.group(1))
+        intent['filters']['days'] = days
         return intent
     
     # Default: search by filename
-    # Extract search term
     patterns = [
-        r'(?:find|search|show|get|list|look for|locate)\s+(?:me\s+)?(?:my\s+)?(?:all\s+)?(.+?)(?:\s+(?:from|in|that|which|with|by)$|$)',
-        r'(?:looking for|need|want)\s+(?:my\s+)?(.+?)($)',
+        r'(?:find|search|show|get|list|look for|locate)\s+(?:me\s+)?(?:my\s+)?(?:all\s+)?(.+?)$',
     ]
     
     for pattern in patterns:
@@ -147,7 +122,5 @@ def parse_user_intent(query: str) -> Dict:
     
     if intent['search_term']:
         intent['search_type'] = 'filename'
-    else:
-        intent['search_type'] = 'general'
     
     return intent

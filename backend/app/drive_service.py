@@ -16,44 +16,33 @@ class GoogleDriveService:
         try:
             credentials = None
             
-            # Method 1: Try to get credentials from environment variable (Render.com)
+            # Try to get credentials from environment variable
             creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
             if creds_json_str:
                 try:
-                    print("📖 Loading credentials from GOOGLE_CREDENTIALS_JSON environment variable")
-                    # Clean and parse the JSON
-                    creds_json_str = creds_json_str.strip()
                     creds_dict = json.loads(creds_json_str)
                     credentials = service_account.Credentials.from_service_account_info(
                         creds_dict,
                         scopes=['https://www.googleapis.com/auth/drive.readonly']
                     )
-                    print("✅ Successfully loaded credentials from environment variable")
-                except json.JSONDecodeError as e:
-                    print(f"❌ Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
                 except Exception as e:
-                    print(f"❌ Error loading credentials from env: {e}")
+                    print(f"Error loading credentials from env: {e}")
             
-            # Method 2: Try to load from file
+            # Fall back to file
             if not credentials and self.service_account_file and os.path.exists(self.service_account_file):
-                try:
-                    print(f"📖 Loading credentials from file: {self.service_account_file}")
-                    credentials = service_account.Credentials.from_service_account_file(
-                        self.service_account_file,
-                        scopes=['https://www.googleapis.com/auth/drive.readonly']
-                    )
-                    print("✅ Successfully loaded credentials from file")
-                except Exception as e:
-                    print(f"❌ Failed to load from file: {e}")
+                credentials = service_account.Credentials.from_service_account_file(
+                    self.service_account_file,
+                    scopes=['https://www.googleapis.com/auth/drive.readonly']
+                )
             
             if not credentials:
-                raise Exception("No valid credentials found. Set GOOGLE_CREDENTIALS_JSON environment variable or provide a valid service account file.")
+                raise Exception("No valid credentials found")
             
             self.service = build('drive', 'v3', credentials=credentials)
             return self.service
             
         except Exception as e:
-            print(f"❌ Authentication error: {e}")
+            print(f"Authentication error: {e}")
             raise e
     
     def search_files(
@@ -67,36 +56,46 @@ class GoogleDriveService:
         """Search within the specific folder using q parameter"""
         
         if not self.folder_id:
-            raise Exception("DRIVE_FOLDER_ID is not set. Please configure it in environment variables.")
+            raise Exception("DRIVE_FOLDER_ID is not set")
         
-        # Build the folder filter (ALWAYS include this)
+        # Build the folder filter
         q_parts = [f"'{self.folder_id}' in parents"]
         
-        # Build name filter (partial match)
+        # Build name filter
         if query:
-            # Escape single quotes in the query
             safe_query = query.replace("'", "\\'")
             q_parts.append(f"name contains '{safe_query}'")
         
-        # Build type filter (mimeType)
+        # Build type filter - FIXED: Map properly to Google Drive mimeTypes
         if file_types:
             type_filters = []
             for ft in file_types:
                 ft_lower = ft.lower()
-                if ft_lower == 'pdf':
-                    type_filters.append("mimeType='application/pdf'")
-                elif ft_lower == 'document':
-                    type_filters.append("mimeType='application/vnd.google-apps.document'")
-                elif ft_lower == 'spreadsheet':
+                # Map common file types to Google Drive mimeTypes
+                if ft_lower in ['spreadsheet', 'excel', 'sheet', 'xlsx', 'csv']:
                     type_filters.append("mimeType='application/vnd.google-apps.spreadsheet'")
-                elif ft_lower == 'presentation':
-                    type_filters.append("mimeType='application/vnd.google-apps.presentation'")
-                elif ft_lower == 'image':
+                    # Also include Excel files
+                    type_filters.append("mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'")
+                    type_filters.append("mimeType='application/vnd.ms-excel'")
+                elif ft_lower in ['pdf']:
+                    type_filters.append("mimeType='application/pdf'")
+                elif ft_lower in ['image', 'picture', 'photo', 'jpg', 'png', 'gif']:
                     type_filters.append("mimeType contains 'image/'")
+                elif ft_lower in ['presentation', 'powerpoint', 'slides', 'ppt', 'pptx']:
+                    type_filters.append("mimeType='application/vnd.google-apps.presentation'")
+                    type_filters.append("mimeType='application/vnd.openxmlformats-officedocument.presentationml.presentation'")
+                elif ft_lower in ['document', 'doc', 'word', 'txt']:
+                    type_filters.append("mimeType='application/vnd.google-apps.document'")
+                    type_filters.append("mimeType='application/msword'")
+                    type_filters.append("mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document'")
+                else:
+                    # Default: search by mimeType
+                    type_filters.append(f"mimeType contains '{ft_lower}'")
+            
             if type_filters:
                 q_parts.append(f"({' or '.join(type_filters)})")
         
-        # Build date filters (createdTime/modifiedTime)
+        # Build date filters
         if created_after:
             q_parts.append(f"createdTime > '{created_after.isoformat()}'")
         if modified_after:
@@ -106,15 +105,18 @@ class GoogleDriveService:
         full_query = " and ".join(q_parts)
         print(f"🔍 Search query: {full_query}")
         
-        # Execute with proper q parameter
-        results = self.service.files().list(
-            q=full_query,
-            spaces='drive',
-            fields='files(id, name, mimeType, createdTime, modifiedTime, size, webViewLink)',
-            pageSize=max_results
-        ).execute()
-        
-        return results.get('files', [])
+        # Execute search
+        try:
+            results = self.service.files().list(
+                q=full_query,
+                spaces='drive',
+                fields='files(id, name, mimeType, createdTime, modifiedTime, size, webViewLink)',
+                pageSize=max_results
+            ).execute()
+            return results.get('files', [])
+        except Exception as e:
+            print(f"Search error: {e}")
+            return []
     
     def get_file_content(self, file_id: str) -> Optional[str]:
         """Get file content for text-based files"""
