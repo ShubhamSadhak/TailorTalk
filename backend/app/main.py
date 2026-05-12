@@ -21,29 +21,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Drive Service with Service Account (no OAuth needed)
-try:
-    # Use Service Account authentication instead of OAuth
-    drive_service = GoogleDriveService(
-        service_account_file=config.SERVICE_ACCOUNT_FILE,
-        folder_id=config.DRIVE_FOLDER_ID
-    )
-    
-    # Authenticate Drive service
-    drive_service.authenticate()
-    logger.info(f"✅ Google Drive Service Account authentication successful")
-    logger.info(f"📁 Searching within folder ID: {config.DRIVE_FOLDER_ID}")
-    
-except Exception as e:
-    logger.error(f"❌ Google Drive authentication failed: {e}")
-    logger.error("Make sure:")
-    logger.error("1. Service account JSON file exists at the specified path")
-    logger.error("2. The test folder is shared with the service account email")
-    logger.error("3. DRIVE_FOLDER_ID is correct in .env file")
+# Validate configuration
+missing_vars = config.validate()
+if missing_vars:
+    logger.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+    logger.error("Please add these to your Render environment settings")
     drive_service = None
-
-# Initialize conversational agent
-agent = DriveConversationalAgent(drive_service) if drive_service else None
+    agent = None
+else:
+    # Initialize Drive Service with Service Account
+    try:
+        drive_service = GoogleDriveService(
+            service_account_file=getattr(config, 'SERVICE_ACCOUNT_FILE', None),
+            folder_id=config.DRIVE_FOLDER_ID
+        )
+        
+        # Authenticate Drive service
+        drive_service.authenticate()
+        logger.info(f"✅ Google Drive Service Account authentication successful")
+        logger.info(f"📁 Searching within folder ID: {config.DRIVE_FOLDER_ID}")
+        
+        # Initialize conversational agent
+        agent = DriveConversationalAgent(drive_service)
+        logger.info(f"✅ Conversational agent initialized with Gemini")
+        
+    except Exception as e:
+        logger.error(f"❌ Google Drive authentication failed: {e}")
+        drive_service = None
+        agent = None
 
 @app.get("/")
 async def root():
@@ -52,9 +57,28 @@ async def root():
         "message": "Google Drive AI Agent with Service Account",
         "status": "running",
         "authentication": "✅ Service Account" if drive_service else "❌ Failed",
-        "folder_id": config.DRIVE_FOLDER_ID if drive_service else None
+        "folder_id": config.DRIVE_FOLDER_ID if drive_service else None,
+        "env_vars_set": {
+            "GEMINI_API_KEY": bool(config.GEMINI_API_KEY),
+            "DRIVE_FOLDER_ID": bool(config.DRIVE_FOLDER_ID),
+            "GOOGLE_CREDENTIALS_JSON": bool(os.getenv("GOOGLE_CREDENTIALS_JSON")),
+        }
     }
     return status
+
+@app.get("/debug")
+async def debug():
+    """Debug endpoint to check configuration"""
+    return {
+        "has_gemini_key": bool(config.GEMINI_API_KEY),
+        "has_drive_folder_id": bool(config.DRIVE_FOLDER_ID),
+        "folder_id_value": config.DRIVE_FOLDER_ID,
+        "has_service_account_file": bool(config.SERVICE_ACCOUNT_FILE),
+        "has_google_creds_json": bool(os.getenv("GOOGLE_CREDENTIALS_JSON")),
+        "drive_service_initialized": drive_service is not None,
+        "agent_initialized": agent is not None,
+        "missing_vars": config.validate()
+    }
 
 @app.get("/health")
 async def health_check():
@@ -63,7 +87,8 @@ async def health_check():
         return {
             "status": "unhealthy",
             "error": "Drive service not initialized",
-            "folder_id": config.DRIVE_FOLDER_ID
+            "folder_id": config.DRIVE_FOLDER_ID,
+            "missing_config": config.validate()
         }
     
     # Test if folder is accessible
@@ -73,7 +98,8 @@ async def health_check():
             "status": "healthy",
             "folder_accessible": True,
             "folder_id": config.DRIVE_FOLDER_ID,
-            "message": "Service account can access the folder"
+            "message": "Service account can access the folder",
+            "files_found": len(test_search)
         }
     except Exception as e:
         return {
@@ -86,8 +112,8 @@ async def health_check():
 @app.post("/search", response_model=SearchResponse)
 async def search_drive(request: SearchRequest):
     """Search Google Drive using natural language"""
-    if not drive_service:
-        raise HTTPException(status_code=503, detail="Drive service not initialized")
+    if not drive_service or not agent:
+        raise HTTPException(status_code=503, detail="Drive service not initialized. Check /debug endpoint.")
     
     try:
         result = await agent.process_query(request.query, request.user_id)
@@ -95,7 +121,7 @@ async def search_drive(request: SearchRequest):
         return SearchResponse(
             success=result["success"],
             message=result["response"],
-            results=[],  # Would populate with actual file objects
+            results=[],
             total_results=result.get("files_found", 0)
         )
     except Exception as e:
@@ -105,7 +131,7 @@ async def search_drive(request: SearchRequest):
 @app.post("/chat")
 async def chat(request: SearchRequest):
     """Chat with the Drive assistant"""
-    if not drive_service:
+    if not drive_service or not agent:
         raise HTTPException(status_code=503, detail="Drive service not initialized")
     
     try:

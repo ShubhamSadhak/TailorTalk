@@ -1,23 +1,60 @@
 import os
+import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 
 class GoogleDriveService:
-    def __init__(self, service_account_file: str, folder_id: str):
+    def __init__(self, service_account_file: str = None, folder_id: str = None):
         self.service_account_file = service_account_file
-        self.folder_id = folder_id  # The specific folder to search
+        self.folder_id = folder_id
         self.service = None
         
     def authenticate(self):
-        """Authenticate using Service Account (no user interaction)"""
-        credentials = service_account.Credentials.from_service_account_file(
-            self.service_account_file,
-            scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-        self.service = build('drive', 'v3', credentials=credentials)
-        return self.service
+        """Authenticate using Service Account from file or environment variable"""
+        try:
+            credentials = None
+            
+            # Method 1: Try to get credentials from environment variable (Render.com)
+            creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
+            if creds_json_str:
+                try:
+                    print("📖 Loading credentials from GOOGLE_CREDENTIALS_JSON environment variable")
+                    # Clean and parse the JSON
+                    creds_json_str = creds_json_str.strip()
+                    creds_dict = json.loads(creds_json_str)
+                    credentials = service_account.Credentials.from_service_account_info(
+                        creds_dict,
+                        scopes=['https://www.googleapis.com/auth/drive.readonly']
+                    )
+                    print("✅ Successfully loaded credentials from environment variable")
+                except json.JSONDecodeError as e:
+                    print(f"❌ Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
+                except Exception as e:
+                    print(f"❌ Error loading credentials from env: {e}")
+            
+            # Method 2: Try to load from file
+            if not credentials and self.service_account_file and os.path.exists(self.service_account_file):
+                try:
+                    print(f"📖 Loading credentials from file: {self.service_account_file}")
+                    credentials = service_account.Credentials.from_service_account_file(
+                        self.service_account_file,
+                        scopes=['https://www.googleapis.com/auth/drive.readonly']
+                    )
+                    print("✅ Successfully loaded credentials from file")
+                except Exception as e:
+                    print(f"❌ Failed to load from file: {e}")
+            
+            if not credentials:
+                raise Exception("No valid credentials found. Set GOOGLE_CREDENTIALS_JSON environment variable or provide a valid service account file.")
+            
+            self.service = build('drive', 'v3', credentials=credentials)
+            return self.service
+            
+        except Exception as e:
+            print(f"❌ Authentication error: {e}")
+            raise e
     
     def search_files(
         self, 
@@ -29,12 +66,17 @@ class GoogleDriveService:
     ) -> List[Dict]:
         """Search within the specific folder using q parameter"""
         
+        if not self.folder_id:
+            raise Exception("DRIVE_FOLDER_ID is not set. Please configure it in environment variables.")
+        
         # Build the folder filter (ALWAYS include this)
         q_parts = [f"'{self.folder_id}' in parents"]
         
         # Build name filter (partial match)
         if query:
-            q_parts.append(f"name contains '{query}'")
+            # Escape single quotes in the query
+            safe_query = query.replace("'", "\\'")
+            q_parts.append(f"name contains '{safe_query}'")
         
         # Build type filter (mimeType)
         if file_types:
@@ -62,6 +104,7 @@ class GoogleDriveService:
         
         # Combine all filters
         full_query = " and ".join(q_parts)
+        print(f"🔍 Search query: {full_query}")
         
         # Execute with proper q parameter
         results = self.service.files().list(
