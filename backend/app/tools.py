@@ -1,7 +1,35 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Type
 from datetime import datetime, timedelta
+from langchain.tools import BaseTool
+from pydantic import BaseModel, Field
 from .drive_service import GoogleDriveService
 import re
+
+# Define input schemas for each tool
+class FilenameInput(BaseModel):
+    filename: str = Field(description="The filename or partial filename to search for")
+    max_results: int = Field(default=20, description="Maximum number of results to return")
+
+class FiletypeInput(BaseModel):
+    filetype: str = Field(description="File type to search for (pdf, document, spreadsheet, presentation, image)")
+    max_results: int = Field(default=20, description="Maximum number of results to return")
+
+class DateRangeInput(BaseModel):
+    start_date: Optional[str] = Field(default=None, description="Start date in YYYY-MM-DD format")
+    end_date: Optional[str] = Field(default=None, description="End date in YYYY-MM-DD format")
+    max_results: int = Field(default=20, description="Maximum number of results to return")
+
+class RecentFilesInput(BaseModel):
+    days: int = Field(default=7, description="Number of days to look back")
+    max_results: int = Field(default=20, description="Maximum number of results to return")
+
+class ExtensionInput(BaseModel):
+    extension: str = Field(description="File extension to search for (e.g., pdf, docx, xlsx)")
+    max_results: int = Field(default=20, description="Maximum number of results to return")
+
+class ContentInput(BaseModel):
+    search_text: str = Field(description="Text to search for within file content")
+    max_results: int = Field(default=20, description="Maximum number of results to return")
 
 class DriveTools:
     def __init__(self, drive_service: GoogleDriveService):
@@ -12,7 +40,7 @@ class DriveTools:
         return self.drive_service.search_files(
             query=filename, 
             max_results=max_results
-    )
+        )
     
     def search_by_filetype(self, filetype: str, max_results: int = 20) -> List[Dict]:
         """Search files by file type (pdf, document, spreadsheet, presentation, image)"""
@@ -36,7 +64,6 @@ class DriveTools:
             modified_after = datetime.strptime(start_date, "%Y-%m-%d")
         
         if end_date:
-            # This would need more complex filtering for end dates
             pass
         
         return self.drive_service.search_files(
@@ -66,6 +93,51 @@ class DriveTools:
                     break
         
         return matching_files
+
+# Create LangChain-compatible tool wrappers
+def create_tools(drive_tools: DriveTools):
+    """Create LangChain tools from DriveTools instance"""
+    
+    from langchain.tools import tool
+    
+    @tool
+    def search_by_filename(filename: str, max_results: int = 20) -> str:
+        """Search files by filename within the designated folder"""
+        results = drive_tools.search_by_filename(filename, max_results)
+        if results:
+            return f"Found {len(results)} files: {', '.join([f['name'] for f in results])}"
+        return f"No files found matching '{filename}'"
+    
+    @tool
+    def search_by_filetype(filetype: str, max_results: int = 20) -> str:
+        """Search files by file type (pdf, document, spreadsheet, presentation, image)"""
+        results = drive_tools.search_by_filetype(filetype, max_results)
+        if results:
+            return f"Found {len(results)} {filetype} files: {', '.join([f['name'] for f in results])}"
+        return f"No {filetype} files found"
+    
+    @tool
+    def search_recent_files(days: int = 7, max_results: int = 20) -> str:
+        """Search files modified in the last N days"""
+        results = drive_tools.search_recent_files(days, max_results)
+        if results:
+            return f"Found {len(results)} files modified in the last {days} days: {', '.join([f['name'] for f in results])}"
+        return f"No files found modified in the last {days} days"
+    
+    @tool
+    def search_files_by_content(search_text: str, max_results: int = 20) -> str:
+        """Search within file content (for text-based files)"""
+        results = drive_tools.search_files_by_content(search_text, max_results)
+        if results:
+            return f"Found {len(results)} files containing '{search_text}': {', '.join([f['name'] for f in results])}"
+        return f"No files found containing '{search_text}'"
+    
+    return [
+        search_by_filename,
+        search_by_filetype,
+        search_recent_files,
+        search_files_by_content
+    ]
 
 def parse_user_intent(query: str) -> Dict:
     """Parse user query to determine search intent"""

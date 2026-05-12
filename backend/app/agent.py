@@ -4,7 +4,7 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import SystemMessage
 from typing import Dict, Any
-from .tools import DriveTools, parse_user_intent
+from .tools import DriveTools, create_tools, parse_user_intent
 from .drive_service import GoogleDriveService
 from .config import config
 
@@ -25,25 +25,17 @@ class DriveConversationalAgent:
             memory_key="chat_history",
             return_messages=True
         )
+        
+        # Create LangChain-compatible tools
+        self.tools = create_tools(self.drive_tools)
         self.agent = self._create_agent()
         self.agent_executor = AgentExecutor(
             agent=self.agent,
-            tools=self._get_tools(),
+            tools=self.tools,
             memory=self.memory,
             verbose=True,
             handle_parsing_errors=True
         )
-    
-    def _get_tools(self):
-        """Get all available tools"""
-        return [
-            self.drive_tools.search_by_filename,
-            self.drive_tools.search_by_filetype,
-            self.drive_tools.search_by_date_range,
-            self.drive_tools.search_recent_files,
-            self.drive_tools.search_by_extension,
-            self.drive_tools.search_files_by_content,
-        ]
     
     def _create_agent(self):
         """Create the LangChain agent with Gemini"""
@@ -73,13 +65,15 @@ class DriveConversationalAgent:
             
             User: "Only recent ones"
             Assistant: "Showing PDFs modified in the last 30 days: [list files]"
+            
+            Use the available tools to search Google Drive and provide accurate responses.
             """),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
         
-        return create_openai_tools_agent(self.llm, self._get_tools(), prompt)
+        return create_openai_tools_agent(self.llm, self.tools, prompt)
     
     async def process_query(self, query: str, user_id: str = None) -> Dict[str, Any]:
         """Process user query and return response"""
@@ -97,6 +91,7 @@ class DriveConversationalAgent:
                 "intent": intent
             }
         except Exception as e:
+            print(f"Agent error: {e}")
             return await self._direct_search(query, intent)
     
     async def _direct_search(self, query: str, intent: Dict) -> Dict[str, Any]:
