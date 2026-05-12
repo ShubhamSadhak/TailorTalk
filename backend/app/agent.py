@@ -2,7 +2,6 @@ from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
-from langchain.schema import SystemMessage
 from typing import Dict, Any
 from .tools import DriveTools, create_tools, parse_user_intent
 from .drive_service import GoogleDriveService
@@ -13,12 +12,11 @@ class DriveConversationalAgent:
         self.drive_service = drive_service
         self.drive_tools = DriveTools(drive_service)
         
-        # Initialize Gemini
+        # Initialize Gemini (no system message support)
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-pro",
             temperature=0.7,
-            google_api_key=config.GEMINI_API_KEY,
-            convert_system_message_to_human=True
+            google_api_key=config.GEMINI_API_KEY
         )
         
         self.memory = ConversationBufferMemory(
@@ -38,38 +36,10 @@ class DriveConversationalAgent:
         )
     
     def _create_agent(self):
-        """Create the LangChain agent with Gemini"""
+        """Create the LangChain agent with Gemini (no system message)"""
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content="""You are a helpful AI assistant that helps users search and manage their Google Drive files.
-            
-            IMPORTANT: You are searching within a SPECIFIC FOLDER in Google Drive, not the entire Drive.
-            
-            You can search by:
-            - filename (partial or full)
-            - file type (pdf, document, spreadsheet, presentation, image)
-            - date range (created or modified)
-            - recent files (last N days)
-            - file extensions
-            - file content (for text-based files)
-            
-            When responding:
-            - Be concise but informative
-            - Show file names, types, and modification dates
-            - If no files found, suggest alternative search terms
-            - Help users refine their search if needed
-            - Keep track of previous searches to answer follow-up questions
-            
-            Examples:
-            User: "Find my PDF files"
-            Assistant: "I found 12 PDF files in the folder. Here are the most recent ones: [list files]"
-            
-            User: "Only recent ones"
-            Assistant: "Showing PDFs modified in the last 30 days: [list files]"
-            
-            Use the available tools to search Google Drive and provide accurate responses.
-            """),
             MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}"),
+            ("human", "You are a helpful Google Drive assistant. {input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
         
@@ -81,7 +51,7 @@ class DriveConversationalAgent:
         
         try:
             response = await self.agent_executor.ainvoke({
-                "input": query,
+                "input": f"User asked: {query}. Please search Google Drive and respond helpfully.",
                 "user_id": user_id
             })
             
