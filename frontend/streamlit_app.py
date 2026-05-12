@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 from datetime import datetime
 import json
+import os
 
 # Page configuration
 st.set_page_config(
@@ -10,8 +11,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# API configuration
-API_URL = "http://localhost:8000"
+# Get backend URL from environment variable or use default
+# For Streamlit Cloud, this will come from secrets
+BACKEND_URL = st.secrets.get("BACKEND_URL", "https://google-drive-ai-backend.onrender.com")
 
 # Custom CSS
 st.markdown("""
@@ -43,17 +45,6 @@ st.markdown("""
         border-left: 4px solid #4285f4;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .search-example {
-        background-color: #f8f9fa;
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        margin: 0.25rem;
-        cursor: pointer;
-        transition: background-color 0.3s;
-    }
-    .search-example:hover {
-        background-color: #e9ecef;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,29 +52,31 @@ st.markdown("""
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "search_results" not in st.session_state:
-    st.session_state.search_results = []
-
 def send_message(message: str):
-    """Send message to API and get response"""
+    """Send message to backend API and get response"""
     try:
         response = requests.post(
-            f"{API_URL}/chat",
-            json={"query": message, "user_id": "streamlit_user"}
+            f"{BACKEND_URL}/chat",
+            json={"query": message, "user_id": "streamlit_user"},
+            timeout=30
         )
         
         if response.status_code == 200:
             return response.json()
         else:
-            return {"success": False, "response": f"Error: {response.status_code}"}
+            return {"success": False, "response": f"Error: {response.status_code} - Please make sure the backend is running"}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "response": "Cannot connect to backend. Please make sure the backend server is running."}
     except Exception as e:
-        return {"success": False, "response": f"Connection error: {str(e)}"}
+        return {"success": False, "response": f"Error: {str(e)}"}
 
 def clear_chat():
     """Clear chat history"""
     st.session_state.messages = []
-    st.session_state.search_results = []
-    requests.post(f"{API_URL}/clear_memory", params={"user_id": "streamlit_user"})
+    try:
+        requests.post(f"{BACKEND_URL}/clear_memory", params={"user_id": "streamlit_user"})
+    except:
+        pass
 
 # Header
 st.markdown('<div class="main-header">🤖 Google Drive AI Assistant</div>', unsafe_allow_html=True)
@@ -106,18 +99,19 @@ with st.sidebar:
     
     for example in examples:
         if st.button(example, key=example):
-            response = send_message(example)
-            st.session_state.messages.append({
-                "role": "user",
-                "content": example,
-                "timestamp": datetime.now()
-            })
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response.get("response", "No response"),
-                "timestamp": datetime.now()
-            })
-            st.rerun()
+            with st.spinner("Searching..."):
+                response = send_message(example)
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": example,
+                    "timestamp": datetime.now()
+                })
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response.get("response", "No response"),
+                    "timestamp": datetime.now()
+                })
+                st.rerun()
     
     st.markdown("---")
     st.markdown("## 📊 Filters")
@@ -137,18 +131,19 @@ with st.sidebar:
         query = f"Show {file_type.lower() if file_type != 'All' else ''} files "
         if date_range != "All time":
             query += f"from {date_range.lower()}"
-        response = send_message(query)
-        st.session_state.messages.append({
-            "role": "user",
-            "content": query,
-            "timestamp": datetime.now()
-        })
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response.get("response", "No response"),
-            "timestamp": datetime.now()
-        })
-        st.rerun()
+        with st.spinner("Searching..."):
+            response = send_message(query)
+            st.session_state.messages.append({
+                "role": "user",
+                "content": query,
+                "timestamp": datetime.now()
+            })
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.get("response", "No response"),
+                "timestamp": datetime.now()
+            })
+            st.rerun()
     
     st.markdown("---")
     if st.button("🗑️ Clear Chat History"):
@@ -162,6 +157,18 @@ with st.sidebar:
     st.markdown("- Filter by date (created/modified)")
     st.markdown("- Understand conversational context")
     st.markdown("- Handle follow-up questions")
+    
+    # Show backend status
+    st.markdown("---")
+    st.markdown("### 🔌 Connection Status")
+    try:
+        health_check = requests.get(f"{BACKEND_URL}/", timeout=5)
+        if health_check.status_code == 200:
+            st.success("✅ Backend Connected")
+        else:
+            st.error("❌ Backend Error")
+    except:
+        st.error("❌ Backend Disconnected")
 
 # Main chat area
 chat_container = st.container()
@@ -195,23 +202,9 @@ with chat_container:
         
         st.rerun()
 
-# Display search statistics
-if st.session_state.messages:
-    st.markdown("---")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Total Conversations", len([m for m in st.session_state.messages if m["role"] == "user"]))
-    
-    with col2:
-        st.metric("Last Search", st.session_state.messages[-1]["timestamp"].strftime("%H:%M:%S") if st.session_state.messages else "None")
-    
-    with col3:
-        st.metric("Session Active", "✅ Yes")
-
 # Footer
 st.markdown("---")
 st.markdown(
-    "<center>Powered by FastAPI, LangChain, and Google Drive API</center>",
+    "<center>Powered by FastAPI, LangChain, Google Drive API, and Gemini</center>",
     unsafe_allow_html=True
 )
