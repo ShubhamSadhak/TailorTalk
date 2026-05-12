@@ -1,27 +1,108 @@
-from typing import Dict, Any, List
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import SystemMessage
+from typing import Dict, Any
 from .tools import DriveTools, parse_user_intent
 from .drive_service import GoogleDriveService
+from .config import config
 
 class DriveConversationalAgent:
     def __init__(self, drive_service: GoogleDriveService):
         self.drive_service = drive_service
         self.drive_tools = DriveTools(drive_service)
-        self.memory: Dict[str, List[Dict[str, Any]]] = {}
+        
+        # Initialize Gemini
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-pro",
+            temperature=0.7,
+            google_api_key=config.GEMINI_API_KEY,
+            convert_system_message_to_human=True
+        )
+        
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True
+        )
+        self.agent = self._create_agent()
+        self.agent_executor = AgentExecutor(
+            agent=self.agent,
+            tools=self._get_tools(),
+            memory=self.memory,
+            verbose=True,
+            handle_parsing_errors=True
+        )
+    
+    def _get_tools(self):
+        """Get all available tools"""
+        return [
+            self.drive_tools.search_by_filename,
+            self.drive_tools.search_by_filetype,
+            self.drive_tools.search_by_date_range,
+            self.drive_tools.search_recent_files,
+            self.drive_tools.search_by_extension,
+            self.drive_tools.search_files_by_content,
+        ]
+    
+    def _create_agent(self):
+        """Create the LangChain agent with Gemini"""
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="""You are a helpful AI assistant that helps users search and manage their Google Drive files.
+            
+            IMPORTANT: You are searching within a SPECIFIC FOLDER in Google Drive, not the entire Drive.
+            
+            You can search by:
+            - filename (partial or full)
+            - file type (pdf, document, spreadsheet, presentation, image)
+            - date range (created or modified)
+            - recent files (last N days)
+            - file extensions
+            - file content (for text-based files)
+            
+            When responding:
+            - Be concise but informative
+            - Show file names, types, and modification dates
+            - If no files found, suggest alternative search terms
+            - Help users refine their search if needed
+            - Keep track of previous searches to answer follow-up questions
+            
+            Examples:
+            User: "Find my PDF files"
+            Assistant: "I found 12 PDF files in the folder. Here are the most recent ones: [list files]"
+            
+            User: "Only recent ones"
+            Assistant: "Showing PDFs modified in the last 30 days: [list files]"
+            """),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
+        
+        return create_openai_tools_agent(self.llm, self._get_tools(), prompt)
     
     async def process_query(self, query: str, user_id: str = None) -> Dict[str, Any]:
         """Process user query and return response"""
-        current_user = user_id or "default"
         intent = parse_user_intent(query)
-        intent = self._merge_with_context(current_user, intent, query)
-        result = await self._direct_search(query, intent)
-        self._remember_query(current_user, query, intent, result)
-        return result
+        
+        try:
+            response = await self.agent_executor.ainvoke({
+                "input": query,
+                "user_id": user_id
+            })
+            
+            return {
+                "success": True,
+                "response": response.get("output", "I couldn't process that request."),
+                "intent": intent
+            }
+        except Exception as e:
+            return await self._direct_search(query, intent)
     
     async def _direct_search(self, query: str, intent: Dict) -> Dict[str, Any]:
         """Direct search without agent (fallback)"""
         filters = intent.get('filters', {})
         
-        # Apply filters based on intent
         if 'file_type' in filters:
             files = self.drive_service.search_files(
                 file_types=[filters['file_type']],
@@ -46,10 +127,9 @@ class DriveConversationalAgent:
         else:
             files = self.drive_service.search_files(max_results=20)
         
-        # Format response
         if files:
-            response_text = f"I found {len(files)} files:\n\n"
-            for file in files[:10]:  # Limit to 10 for readability
+            response_text = f"I found {len(files)} files in the folder:\n\n"
+            for file in files[:10]:
                 response_text += f"📄 **{file.get('name')}**\n"
                 response_text += f"   Type: {file.get('mimeType', 'Unknown')}\n"
                 response_text += f"   Modified: {file.get('modifiedTime', 'Unknown')[:10]}\n\n"
@@ -57,7 +137,7 @@ class DriveConversationalAgent:
             if len(files) > 10:
                 response_text += f"...and {len(files) - 10} more files."
         else:
-            response_text = "I couldn't find any files matching your search. Try using different keywords or filters."
+            response_text = "I couldn't find any files matching your search in this folder. Try using different keywords or check if the folder contains such files."
         
         return {
             "success": True,
@@ -66,40 +146,6 @@ class DriveConversationalAgent:
             "files_found": len(files)
         }
     
-    def _merge_with_context(self, user_id: str, intent: Dict[str, Any], query: str) -> Dict[str, Any]:
-        """Apply light conversational context for follow-up searches."""
-        history = self.memory.get(user_id, [])
-        if not history:
-            return intent
-
-        latest = history[-1]["intent"]
-        query_lower = query.lower()
-        follow_up_markers = ["recent", "only", "those", "them", "same", "again"]
-
-        if any(marker in query_lower for marker in follow_up_markers):
-            if "file_type" not in intent["filters"] and "file_type" in latest.get("filters", {}):
-                intent["filters"]["file_type"] = latest["filters"]["file_type"]
-            if not intent.get("search_term") and latest.get("search_term"):
-                intent["search_term"] = latest["search_term"]
-
-        return intent
-
-    def _remember_query(
-        self,
-        user_id: str,
-        query: str,
-        intent: Dict[str, Any],
-        result: Dict[str, Any]
-    ) -> None:
-        history = self.memory.setdefault(user_id, [])
-        history.append({
-            "query": query,
-            "intent": intent,
-            "files_found": result.get("files_found", 0),
-        })
-        if len(history) > 20:
-            del history[:-20]
-
     def clear_memory(self):
         """Clear conversation memory"""
         self.memory.clear()

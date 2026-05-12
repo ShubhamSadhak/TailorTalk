@@ -1,103 +1,77 @@
 import os
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
-import pickle
 
 class GoogleDriveService:
-    def __init__(self, credentials_path: str, scopes: List[str]):
-        self.credentials_path = credentials_path
-        self.scopes = scopes
+    def __init__(self, service_account_file: str, folder_id: str):
+        self.service_account_file = service_account_file
+        self.folder_id = folder_id  # The specific folder to search
         self.service = None
-        self.creds = None
         
     def authenticate(self):
-        """Authenticate and build the Drive service"""
-        token_path = 'token.pickle'
-        
-        if os.path.exists(token_path):
-            with open(token_path, 'rb') as token:
-                self.creds = pickle.load(token)
-        
-        if not self.creds or not self.creds.valid:
-            if self.creds and self.creds.expired and self.creds.refresh_token:
-                self.creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    self.credentials_path, self.scopes
-                )
-                self.creds = flow.run_local_server(port=0)
-            
-            with open(token_path, 'wb') as token:
-                pickle.dump(self.creds, token)
-        
-        self.service = build('drive', 'v3', credentials=self.creds)
+        """Authenticate using Service Account (no user interaction)"""
+        credentials = service_account.Credentials.from_service_account_file(
+            self.service_account_file,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        self.service = build('drive', 'v3', credentials=credentials)
         return self.service
     
     def search_files(
-        self,
-        query: str = "",
-        file_types: Optional[List[str]] = None,
-        created_after: Optional[datetime] = None,
-        modified_after: Optional[datetime] = None,
+        self, 
+        query: str = "", 
+        file_types: List[str] = None, 
+        created_after: datetime = None,
+        modified_after: datetime = None,
         max_results: int = 50
     ) -> List[Dict]:
-        """Search files in Google Drive"""
-        drive_query_parts = []
+        """Search within the specific folder using q parameter"""
         
-        # Add name search
+        # Build the folder filter (ALWAYS include this)
+        q_parts = [f"'{self.folder_id}' in parents"]
+        
+        # Build name filter (partial match)
         if query:
-            drive_query_parts.append(f"name contains '{query}'")
+            q_parts.append(f"name contains '{query}'")
         
-        # Add file type filters
+        # Build type filter (mimeType)
         if file_types:
-            type_queries = []
+            type_filters = []
             for ft in file_types:
-                if ft.lower() == 'pdf':
-                    type_queries.append("mimeType='application/pdf'")
-                elif ft.lower() == 'document':
-                    type_queries.append("mimeType='application/vnd.google-apps.document'")
-                elif ft.lower() == 'spreadsheet':
-                    type_queries.append("mimeType='application/vnd.google-apps.spreadsheet'")
-                elif ft.lower() == 'presentation':
-                    type_queries.append("mimeType='application/vnd.google-apps.presentation'")
-                elif ft.lower() == 'image':
-                    type_queries.append("mimeType contains 'image/'")
-            if type_queries:
-                drive_query_parts.append(f"({' or '.join(type_queries)})")
+                ft_lower = ft.lower()
+                if ft_lower == 'pdf':
+                    type_filters.append("mimeType='application/pdf'")
+                elif ft_lower == 'document':
+                    type_filters.append("mimeType='application/vnd.google-apps.document'")
+                elif ft_lower == 'spreadsheet':
+                    type_filters.append("mimeType='application/vnd.google-apps.spreadsheet'")
+                elif ft_lower == 'presentation':
+                    type_filters.append("mimeType='application/vnd.google-apps.presentation'")
+                elif ft_lower == 'image':
+                    type_filters.append("mimeType contains 'image/'")
+            if type_filters:
+                q_parts.append(f"({' or '.join(type_filters)})")
         
-        # Add date filters
+        # Build date filters (createdTime/modifiedTime)
         if created_after:
-            drive_query_parts.append(f"createdTime > '{created_after.isoformat()}'")
+            q_parts.append(f"createdTime > '{created_after.isoformat()}'")
         if modified_after:
-            drive_query_parts.append(f"modifiedTime > '{modified_after.isoformat()}'")
+            q_parts.append(f"modifiedTime > '{modified_after.isoformat()}'")
         
-        # Combine all query parts
-        full_query = " and ".join(drive_query_parts) if drive_query_parts else ""
+        # Combine all filters
+        full_query = " and ".join(q_parts)
         
-        # Execute search
-        results = []
-        page_token = None
+        # Execute with proper q parameter
+        results = self.service.files().list(
+            q=full_query,
+            spaces='drive',
+            fields='files(id, name, mimeType, createdTime, modifiedTime, size, webViewLink)',
+            pageSize=max_results
+        ).execute()
         
-        while len(results) < max_results:
-            response = self.service.files().list(
-                q=full_query,
-                spaces='drive',
-                fields='nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, webViewLink)',
-                pageToken=page_token,
-                pageSize=min(100, max_results - len(results))
-            ).execute()
-            
-            results.extend(response.get('files', []))
-            page_token = response.get('nextPageToken')
-            
-            if not page_token:
-                break
-        
-        return results[:max_results]
+        return results.get('files', [])
     
     def get_file_content(self, file_id: str) -> Optional[str]:
         """Get file content for text-based files"""
@@ -117,6 +91,6 @@ class GoogleDriveService:
             return None
     
     def get_recent_files(self, days: int = 7, max_results: int = 50) -> List[Dict]:
-        """Get recently modified files"""
+        """Get recently modified files within the folder"""
         modified_after = datetime.now() - timedelta(days=days)
         return self.search_files(modified_after=modified_after, max_results=max_results)

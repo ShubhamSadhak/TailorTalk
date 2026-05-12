@@ -5,11 +5,8 @@ load_dotenv()
 
 class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    DRIVE_SCOPES = os.getenv("DRIVE_SCOPES", "https://www.googleapis.com/auth/drive.readonly")
-    
-    # Search configurations
+    SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
+    DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")  # Specific folder ID
     MAX_RESULTS = 50
-    DATE_FORMAT = "%Y-%m-%d"
     
 config = Config()

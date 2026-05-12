@@ -8,8 +8,11 @@ class DriveTools:
         self.drive_service = drive_service
     
     def search_by_filename(self, filename: str, max_results: int = 20) -> List[Dict]:
-        """Search files by filename"""
-        return self.drive_service.search_files(query=filename, max_results=max_results)
+        """Search files by filename within the designated folder"""
+        return self.drive_service.search_files(
+            query=filename, 
+            max_results=max_results
+    )
     
     def search_by_filetype(self, filetype: str, max_results: int = 20) -> List[Dict]:
         """Search files by file type (pdf, document, spreadsheet, presentation, image)"""

@@ -5,11 +5,12 @@ from .drive_service import GoogleDriveService
 from .agent import DriveConversationalAgent
 from .schemas import SearchRequest, SearchResponse
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Google Drive AI Agent", version="1.0.0")
+app = FastAPI(title="Google Drive AI Agent with Service Account", version="2.0.0")
 
 # CORS middleware
 app.add_middleware(
@@ -20,29 +21,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize services
-drive_service = GoogleDriveService(
-    credentials_path=config.GOOGLE_APPLICATION_CREDENTIALS,
-    scopes=[config.DRIVE_SCOPES]
-)
-
-# Authenticate Drive service
+# Initialize Drive Service with Service Account (no OAuth needed)
 try:
+    # Use Service Account authentication instead of OAuth
+    drive_service = GoogleDriveService(
+        service_account_file=config.SERVICE_ACCOUNT_FILE,
+        folder_id=config.DRIVE_FOLDER_ID
+    )
+    
+    # Authenticate Drive service
     drive_service.authenticate()
-    logger.info("Google Drive authentication successful")
+    logger.info(f"✅ Google Drive Service Account authentication successful")
+    logger.info(f"📁 Searching within folder ID: {config.DRIVE_FOLDER_ID}")
+    
 except Exception as e:
-    logger.error(f"Google Drive authentication failed: {e}")
+    logger.error(f"❌ Google Drive authentication failed: {e}")
+    logger.error("Make sure:")
+    logger.error("1. Service account JSON file exists at the specified path")
+    logger.error("2. The test folder is shared with the service account email")
+    logger.error("3. DRIVE_FOLDER_ID is correct in .env file")
+    drive_service = None
 
 # Initialize conversational agent
-agent = DriveConversationalAgent(drive_service)
+agent = DriveConversationalAgent(drive_service) if drive_service else None
 
 @app.get("/")
 async def root():
-    return {"message": "Google Drive AI Agent API", "status": "running"}
+    """Health check endpoint"""
+    status = {
+        "message": "Google Drive AI Agent with Service Account",
+        "status": "running",
+        "authentication": "✅ Service Account" if drive_service else "❌ Failed",
+        "folder_id": config.DRIVE_FOLDER_ID if drive_service else None
+    }
+    return status
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check for monitoring"""
+    if not drive_service:
+        return {
+            "status": "unhealthy",
+            "error": "Drive service not initialized",
+            "folder_id": config.DRIVE_FOLDER_ID
+        }
+    
+    # Test if folder is accessible
+    try:
+        test_search = drive_service.search_files(max_results=1)
+        return {
+            "status": "healthy",
+            "folder_accessible": True,
+            "folder_id": config.DRIVE_FOLDER_ID,
+            "message": "Service account can access the folder"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "folder_accessible": False,
+            "error": str(e),
+            "folder_id": config.DRIVE_FOLDER_ID
+        }
 
 @app.post("/search", response_model=SearchResponse)
 async def search_drive(request: SearchRequest):
     """Search Google Drive using natural language"""
+    if not drive_service:
+        raise HTTPException(status_code=503, detail="Drive service not initialized")
+    
     try:
         result = await agent.process_query(request.query, request.user_id)
         
@@ -59,6 +105,9 @@ async def search_drive(request: SearchRequest):
 @app.post("/chat")
 async def chat(request: SearchRequest):
     """Chat with the Drive assistant"""
+    if not drive_service:
+        raise HTTPException(status_code=503, detail="Drive service not initialized")
+    
     try:
         result = await agent.process_query(request.query, request.user_id)
         return result
@@ -69,9 +118,38 @@ async def chat(request: SearchRequest):
 @app.post("/clear_memory")
 async def clear_memory(user_id: str = None):
     """Clear conversation memory"""
-    agent.clear_memory()
-    return {"message": "Memory cleared successfully"}
+    if agent:
+        agent.clear_memory()
+        return {"message": "Memory cleared successfully"}
+    return {"message": "Agent not available"}
+
+@app.get("/folder-info")
+async def get_folder_info():
+    """Get information about the configured folder"""
+    if not drive_service:
+        raise HTTPException(status_code=503, detail="Drive service not initialized")
+    
+    try:
+        # Get folder metadata
+        folder = drive_service.service.files().get(
+            fileId=config.DRIVE_FOLDER_ID,
+            fields='id, name, mimeType, createdTime, modifiedTime'
+        ).execute()
+        
+        # Count files in folder
+        files = drive_service.search_files(max_results=100)
+        
+        return {
+            "folder_id": folder.get('id'),
+            "folder_name": folder.get('name'),
+            "created_time": folder.get('createdTime'),
+            "file_count": len(files),
+            "message": f"Folder contains {len(files)} files"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
